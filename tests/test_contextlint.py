@@ -283,5 +283,205 @@ class TestNoContextFiles(unittest.TestCase):
                              "missing context files should surface in CI (exit 1)")
 
 
+class TestCrossReference(unittest.TestCase):
+    """@-imports are explicit, harness-loaded references: a missing target is a real
+    breakage the agent will hit, so it must be flagged high — but `@` is overloaded
+    (emails, decorators), so precision matters as much as recall.
+    """
+
+    def _cfg(self, root):
+        cfg = Config()
+        cfg.rules = load_config().rules
+        cfg.state_dir = os.path.join(root, "_state")
+        return cfg
+
+    def _xrefs(self, result):
+        return [f for fa in result.files for f in fa.findings
+                if f.rule_id == "broken-cross-reference"]
+
+    def test_broken_import_flagged_high(self):
+        """A @import whose target is absent is a high-severity broken reference."""
+        with tempfile.TemporaryDirectory() as root:
+            _init_repo(root)
+            _write(root, "CLAUDE.md", "Load the standards: @docs/MISSING.md\n")
+            _commit(root, "v1")
+            result = audit_repo(root, self._cfg(root))
+            xrefs = self._xrefs(result)
+            self.assertEqual(len(xrefs), 1)
+            self.assertEqual(xrefs[0].severity.value, "high")
+            self.assertEqual(xrefs[0].evidence[0].kind, "broken_import")
+
+    def test_valid_import_not_flagged(self):
+        """A @import to an existing file must not be flagged (no false positive)."""
+        with tempfile.TemporaryDirectory() as root:
+            _init_repo(root)
+            _write(root, "docs/STANDARDS.md", "Our standards.\n")
+            _write(root, "CLAUDE.md", "Load the standards: @docs/STANDARDS.md\n")
+            _commit(root, "v1")
+            result = audit_repo(root, self._cfg(root))
+            self.assertEqual(self._xrefs(result), [])
+
+    def test_decorator_in_code_fence_not_flagged(self):
+        """`@` inside a code block is an example, not an import — precision."""
+        with tempfile.TemporaryDirectory() as root:
+            _init_repo(root)
+            _write(root, "CLAUDE.md",
+                   "Use fixtures:\n\n```python\n@pytest.fixture\ndef db(): ...\n```\n")
+            _commit(root, "v1")
+            result = audit_repo(root, self._cfg(root))
+            self.assertEqual(self._xrefs(result), [],
+                             "a decorator in a fenced code block is not a broken import")
+
+    def test_email_not_flagged(self):
+        """An email address is not a @import."""
+        with tempfile.TemporaryDirectory() as root:
+            _init_repo(root)
+            _write(root, "CLAUDE.md", "Questions? ping a@b.com for help.\n")
+            _commit(root, "v1")
+            result = audit_repo(root, self._cfg(root))
+            self.assertEqual(self._xrefs(result), [])
+
+    def test_external_home_import_not_flagged(self):
+        """A home-dir import (`@~/...`) is outside the repo and can't be validated, so it
+        must not masquerade as a broken in-repo reference."""
+        with tempfile.TemporaryDirectory() as root:
+            _init_repo(root)
+            _write(root, "CLAUDE.md", "Inherit global rules: @~/.claude/global.md\n")
+            _commit(root, "v1")
+            result = audit_repo(root, self._cfg(root))
+            self.assertEqual(self._xrefs(result), [])
+
+    def test_deleted_import_cites_commit(self):
+        """A @import to a git-deleted file is grounded with the deleting commit, like a
+        stale path reference."""
+        with tempfile.TemporaryDirectory() as root:
+            _init_repo(root)
+            _write(root, "docs/OLD.md", "old\n")
+            _write(root, "CLAUDE.md", "See @docs/OLD.md\n")
+            _commit(root, "v1")
+            os.remove(os.path.join(root, "docs/OLD.md"))
+            del_sha = _commit(root, "drop OLD")
+            result = audit_repo(root, self._cfg(root))
+            xrefs = self._xrefs(result)
+            self.assertEqual(len(xrefs), 1)
+            self.assertEqual(xrefs[0].evidence[0].kind, "path_deleted")
+            self.assertEqual(xrefs[0].evidence[0].commit, del_sha)
+
+    def test_broken_import_suggests_existing_basename(self):
+        """When the target is missing but the same filename exists elsewhere, the finding
+        carries a grounded 'did you mean' so the user can fix it, not just see 'broken'."""
+        with tempfile.TemporaryDirectory() as root:
+            _init_repo(root)
+            _write(root, "STANDARDS.md", "Our standards.\n")  # exists at root, not under docs/
+            _write(root, "CLAUDE.md", "Load: @docs/STANDARDS.md\n")
+            _commit(root, "v1")
+            result = audit_repo(root, self._cfg(root))
+            xrefs = self._xrefs(result)
+            self.assertEqual(len(xrefs), 1)
+            self.assertIsNotNone(xrefs[0].replacement)
+            self.assertIn("STANDARDS.md", xrefs[0].replacement)
+
+
+class TestImportGraph(unittest.TestCase):
+    """The real context surface is the seed files PLUS everything they @import: those are
+    loaded into the agent every session, so they must be audited too — and the walk must
+    survive cycles."""
+
+    def _cfg(self, root):
+        cfg = Config()
+        cfg.rules = load_config().rules
+        cfg.state_dir = os.path.join(root, "_state")
+        return cfg
+
+    def test_imported_file_is_audited(self):
+        """A file pulled in via @import is itself linted, even though no glob matches it."""
+        with tempfile.TemporaryDirectory() as root:
+            _init_repo(root)
+            _write(root, "notes/EXTRA.md", "Read [the gone doc](./gone.md).\n")
+            _write(root, "CLAUDE.md", "Extra context: @notes/EXTRA.md\n")
+            _commit(root, "v1")
+            result = audit_repo(root, self._cfg(root))
+            audited = [fa.file for fa in result.files]
+            self.assertIn("notes/EXTRA.md", audited,
+                          "an @imported file must be audited as loaded context")
+            dead = [f for fa in result.files for f in fa.findings
+                    if f.rule_id == "dead-relative-link" and f.file == "notes/EXTRA.md"]
+            self.assertEqual(len(dead), 1,
+                             "findings inside the imported file must surface")
+
+    def test_import_cycle_terminates(self):
+        """A→B→A import cycle must not loop forever; each file is audited exactly once."""
+        with tempfile.TemporaryDirectory() as root:
+            _init_repo(root)
+            # Imports resolve relative to the importing file's directory: from docs/A.md,
+            # @B.md is the sibling docs/B.md (and vice-versa).
+            _write(root, "docs/A.md", "go to @B.md\n")
+            _write(root, "docs/B.md", "back to @A.md\n")
+            _write(root, "CLAUDE.md", "start @docs/A.md\n")
+            _commit(root, "v1")
+            result = audit_repo(root, self._cfg(root))
+            audited = [fa.file for fa in result.files]
+            self.assertEqual(audited.count("docs/A.md"), 1)
+            self.assertEqual(audited.count("docs/B.md"), 1)
+
+
+class TestScoringV2(unittest.TestCase):
+    """The refined score groups findings by category and caps each category's penalty, so
+    one noisy dimension can't flatten the headline number — while sub-scores and counts
+    keep the detail. The version marker lets downstream consumers detect the formula break.
+    """
+
+    def _cfg(self, root):
+        cfg = Config()
+        cfg.rules = load_config().rules
+        cfg.state_dir = os.path.join(root, "_state")
+        return cfg
+
+    def test_clean_repo_scores_100(self):
+        with tempfile.TemporaryDirectory() as root:
+            _init_repo(root)
+            _write(root, "CLAUDE.md", "All good here.\n")
+            _commit(root, "v1")
+            run = audit_repo(root, self._cfg(root))
+            self.assertEqual(run.all_findings, [])
+            self.assertEqual(run.score, 100)
+
+    def test_nothing_audited_has_no_category_scores(self):
+        with tempfile.TemporaryDirectory() as root:
+            _init_repo(root)
+            _write(root, "main.py", "x = 1\n")
+            _commit(root, "v1")
+            run = audit_repo(root, self._cfg(root))
+            self.assertIsNone(run.score)
+            self.assertIsNone(run.category_scores,
+                              "no audit -> no category scores, not a fake set of 100s")
+
+    def test_category_penalty_is_capped(self):
+        """Four high reference findings (raw penalty 60) are capped at 40, so the score is
+        60 not 40 — the cap is what keeps one dimension from dominating."""
+        with tempfile.TemporaryDirectory() as root:
+            _init_repo(root)
+            _write(root, "CLAUDE.md",
+                   "@a/x.md and @b/y.md and @c/z.md and @d/w.md\n")
+            _commit(root, "v1")
+            run = audit_repo(root, self._cfg(root))
+            xrefs = [f for fa in run.files for f in fa.findings
+                     if f.rule_id == "broken-cross-reference"]
+            self.assertEqual(len(xrefs), 4, "fixture must produce four broken imports")
+            self.assertEqual(run.score, 60, "4*15=60 raw, capped at 40 -> 100-40=60")
+            self.assertEqual(run.category_scores["reference"], 60)
+
+    def test_sidecar_marks_score_version_and_categories(self):
+        with tempfile.TemporaryDirectory() as root:
+            _init_repo(root)
+            _write(root, "CLAUDE.md", "Load @docs/MISSING.md\n")
+            _commit(root, "v1")
+            run = audit_repo(root, self._cfg(root))
+            payload = run.to_dict()
+            self.assertEqual(payload["score_version"], 2)
+            self.assertIsInstance(payload["category_scores"], dict)
+            self.assertIn("reference", payload["category_scores"])
+
+
 if __name__ == "__main__":
     unittest.main()

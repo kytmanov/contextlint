@@ -26,6 +26,14 @@ _URL_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://")
 _PATHISH = re.compile(r"^[\w.\-]+\.[A-Za-z][A-Za-z0-9]+$")
 _PLACEHOLDER = set("*?<>{}[]")
 
+# `@path` imports (Claude Code / Codex). The lookbehind keeps us off email local-parts
+# (`a@b.com`) and `@@` runs. The capture is the raw ref; resolve_ref cleans/validates it.
+IMPORT_RE = re.compile(r"(?<![\w@])@([^\s)\]]+)")
+
+# Code regions where `@` is not an import. Fences first, then inline spans.
+_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+
 
 @dataclass
 class Ctx:
@@ -71,6 +79,39 @@ def _missing_path_evidence(clean: str, snap: Snapshot, kind_prefix: str) -> Evid
     return Evidence(kind=f"{kind_prefix}_missing", detail=f"`{clean}` does not exist in the repo", path=clean)
 
 
+def _mask_code_regions(text: str) -> str:
+    """Blank out fenced and inline code, preserving length and newlines.
+
+    Length preservation lets the engine match over the masked copy yet slice the
+    original by span, so line numbers and matched text stay exact. This mirrors how
+    Claude treats `@` inside code (not an import), killing the decorator false positive.
+    """
+    def blank(m: re.Match) -> str:
+        return "".join("\n" if c == "\n" else " " for c in m.group(0))
+
+    masked = _FENCE_RE.sub(blank, text)
+    return _INLINE_CODE_RE.sub(blank, masked)
+
+
+def resolve_ref(importing_file: str, raw: str) -> str | None:
+    """Resolve an `@import` raw capture to a repo-relative path, or None to skip.
+
+    Resolution is strictly relative to the importing file's directory (matching the
+    harness): an import that only resolves repo-root-relative is one the harness will
+    fail to load, so we do NOT add a lenient root fallback. URLs, anchors, home/abs/glob
+    refs, and `..` escapes are external/unvalidatable and return None.
+    """
+    target = raw.strip().strip("`").rstrip(".,;:")
+    target = target.split("#", 1)[0].strip()
+    if not target or not _looks_like_path(target):
+        return None
+    base = posixpath.dirname(importing_file)
+    resolved = posixpath.normpath(posixpath.join(base, target)).lstrip("./")
+    if not resolved or resolved.startswith(".."):
+        return None
+    return resolved
+
+
 # --- assertion primitives --------------------------------------------------
 # Signature: (value, ctx, params) -> Evidence | None   (per-match)
 #            (text,  ctx, params) -> Evidence | None   (per-file)
@@ -109,6 +150,24 @@ def _link_resolves(value: str, ctx: Ctx, params: dict) -> Evidence | None:
     ev = _missing_path_evidence(resolved, ctx.snapshot, "link")
     if ev.kind == "link_missing":
         ev = Evidence(kind="dead_link", detail=f"link target `{target}` does not resolve", path=resolved)
+    return ev
+
+
+def _ref_resolves(value: str, ctx: Ctx, params: dict) -> Evidence | None:
+    target = resolve_ref(ctx.file, value)
+    if target is None or ctx.snapshot.path_exists(target):
+        return None
+    ev = _missing_path_evidence(target, ctx.snapshot, "import")
+    if ev.kind == "import_missing":
+        ev = Evidence(kind="broken_import",
+                      detail=f"import target `{value}` does not resolve", path=target)
+    # Grounded "did you mean": same basename exists elsewhere in the tree.
+    if ev.replacement is None:
+        base = target.rsplit("/", 1)[-1]
+        elsewhere = sorted(f for f in ctx.snapshot.files
+                           if f.rsplit("/", 1)[-1] == base and f != target)
+        if elsewhere:
+            ev.replacement = f"did you mean `{'` or `'.join(elsewhere[:3])}`?"
     return ev
 
 
@@ -152,6 +211,7 @@ PER_MATCH: dict[str, Callable] = {
     "path_like_exists": _path_like_exists,
     "path_exists": _path_like_exists,
     "link_resolves": _link_resolves,
+    "ref_resolves": _ref_resolves,
     "manifest_has": _manifest_has,
     "present": _present,
 }
@@ -209,16 +269,23 @@ def evaluate_file(rules: list[Rule], file: str, text: str, snapshot: Snapshot,
             pattern = re.compile(rule.match)
         except re.error:
             continue
+        # `skip_code`: match over a code-masked copy (so `@` in code/decorators is ignored),
+        # but read value/matched_text from the ORIGINAL text via spans (mask preserves length).
+        search_text = _mask_code_regions(text) if rule.params.get("skip_code") else text
         seen: set[str] = set()
-        for m in pattern.finditer(text):
-            value = m.group(1) if m.groups() else m.group(0)
+        for m in pattern.finditer(search_text):
+            if m.groups():
+                s, e = m.span(1)
+                value = text[s:e]
+            else:
+                value = text[m.start():m.end()]
             if _ignored(rule, value) or value in seen:
                 continue
             seen.add(value)
             ev = primitive(value, ctx, rule.params)
             if ev is not None:
                 findings.append(
-                    _make_finding(rule, file, ev, matched_text=m.group(0),
+                    _make_finding(rule, file, ev, matched_text=text[m.start():m.end()],
                                   line=_line_of(text, m.start()))
                 )
     return findings
@@ -251,4 +318,6 @@ def _make_finding(rule: Rule, file: str, ev: Evidence, matched_text: str,
         evidence=[ev],
         matched_text=matched_text,
         line=ev.line if ev.line is not None else line,
+        replacement=ev.replacement,
+        category=rule.category,
     )

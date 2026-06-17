@@ -63,6 +63,11 @@ def render_markdown(result: RunResult) -> str:
         "",
     ]
 
+    cat_scores = result.category_scores
+    if cat_scores:
+        rendered = " · ".join(f"{cat} {sc}" for cat, sc in sorted(cat_scores.items()))
+        lines.insert(-1, f"- **By category:** {rendered}")
+
     total_findings = len(result.all_findings)
     if not result.files:
         lines += ["## No context files", "",

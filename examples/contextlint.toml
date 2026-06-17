@@ -24,6 +24,15 @@ severity = "high"
 [checks.token-bloat]
 enabled = true
 
+# Broken @import cross-references are advisory by default. A team that wants a missing
+# import to hard-fail CI (exit 3) can make it blocking:
+[checks.broken-cross-reference]
+enforcement = "blocking"
+
+# --- Declarative rules can set `category` to fold into a scoring dimension ---
+# Categories: reference (cross-refs/links/paths), size (token budget), policy (everything else).
+# Each category's penalty is capped, so one noisy dimension can't flatten the health score.
+
 # --- B. Declarative deterministic rules (new checks from primitives, no code) ---
 [[rules]]
 id = "no-python2"

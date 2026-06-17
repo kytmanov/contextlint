@@ -51,6 +51,7 @@ class Evidence:
     path: str | None = None
     line: int | None = None
     commit: str | None = None
+    replacement: str | None = None  # grounded "did you mean" suggestion, when available
 
     def to_dict(self) -> dict:
         d = {"kind": self.kind, "detail": self.detail}
@@ -60,6 +61,8 @@ class Evidence:
             d["line"] = self.line
         if self.commit is not None:
             d["commit"] = self.commit
+        if self.replacement is not None:
+            d["replacement"] = self.replacement
         return d
 
 
@@ -78,6 +81,7 @@ class Finding:
     line: int | None = None
     replacement: str | None = None  # proposed replacement text, when available
     confidence: float = 1.0
+    category: str = "policy"  # scoring dimension: reference | size | policy
 
     @property
     def signature(self) -> str:
@@ -104,6 +108,7 @@ class Finding:
             "matched_text": self.matched_text,
             "replacement": self.replacement,
             "confidence": self.confidence,
+            "category": self.category,
             "evidence": [e.to_dict() for e in self.evidence],
         }
 
@@ -121,6 +126,7 @@ class Rule:
     match: str | None = None  # regex evaluated against the context file text
     assertion: str = "present"  # name of an assertion primitive (TOML key: `assert`)
     params: dict = field(default_factory=dict)
+    category: str = "policy"  # scoring dimension: reference | size | policy
     severity: Severity = Severity.MEDIUM
     enforcement: Enforcement = Enforcement.ADVISORY
     message: str = ""

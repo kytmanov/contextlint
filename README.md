@@ -2,8 +2,9 @@
 
 ContextLint lints the instruction files your agent harness auto-loads — `AGENTS.md`,
 `CLAUDE.md`, `GEMINI.md`, `.cursor/rules/**`, `.github/copilot-instructions.md` — against the
-repo's actual state. It flags stale path references, dead links, and token bloat, with concrete
-evidence for every finding. It produces grounded suggestions and never modifies your source.
+repo's actual state. It flags stale path references, dead links, broken `@import` cross-references,
+and token bloat, with concrete evidence for every finding. It follows `@import`s to audit the real
+context surface, produces grounded suggestions, and never modifies your source.
 
 ```
 ctxlint .                    # audit the current repo
@@ -73,16 +74,22 @@ snapshot ─▶ discover ─▶ evaluate ─▶ gate ─▶ score ─▶ report
 1. **Snapshot** — take one factual picture of the repo: files and directories that exist now,
    parsed manifests, and git history for deleted/renamed paths. Every finding must trace back to
    a fact here. Git access is best-effort; a non-git tree just yields less evidence.
-2. **Discover** — apply the configured globs to find the context files to audit (the output
-   directory is excluded so prior reports are never re-audited).
+2. **Discover** — apply the configured globs to find the seed context files, then follow their
+   `@import`s (recursively, up to the harness's hop limit) to add every file pulled into context.
+   An imported doc is loaded into the agent every session, so it is audited too even if no glob
+   matches it. The output directory is excluded so prior reports are never re-audited.
 3. **Evaluate** — run the deterministic rule engine over each file. A rule is a `match` regex
-   plus an `assert` primitive (does this referenced path exist? does this link resolve? is the
-   file over budget?). Each check returns concrete evidence or nothing.
+   plus an `assert` primitive (does this referenced path exist? does this link resolve? does this
+   `@import` target exist? is the file over budget?). Each check returns concrete evidence or
+   nothing.
 4. **Gate** — decide whether the expensive LLM pass is worth it. It runs only for files that are
    new, changed since the last run, or over the token budget. Per-file token counts and content
    hashes are kept in the external state dir to make this work across runs.
-5. **Score** — compute a deterministic, model-independent health score (100 = clean; each
-   finding subtracts a severity-weighted penalty).
+5. **Score** — compute a deterministic, model-independent health score (100 = clean). Findings
+   are grouped into categories (`reference`, `size`, `policy`); each category's severity-weighted
+   penalty is capped before being subtracted, so one noisy dimension can't flatten the headline
+   number, and per-category sub-scores are reported alongside it. The JSON sidecar carries a
+   `score_version` so downstream consumers can detect formula changes.
 6. **Report** — render a dated Markdown report plus a machine-readable JSON sidecar, written
    outside the source tree.
 
@@ -98,6 +105,14 @@ all shown in `examples/contextlint.toml`:
 
 Adding a new *primitive* is the only change that needs code; new *rules* are pure config.
 
+`examples/good-claude-md.toml` is a ready-made checklist built entirely from existing primitives:
+it extends the built-in truth checks with a completeness floor (does the file cover testing,
+build/run, setup, conventions, structure?) plus a couple of semantic LLM rules. Copy and tune it:
+
+```
+ctxlint . --config examples/good-claude-md.toml
+```
+
 ## Status & roadmap
 
 Milestone 1 (deterministic core) is implemented:
@@ -105,7 +120,10 @@ Milestone 1 (deterministic core) is implemented:
 - Discovery of context files via configurable globs.
 - A grounding snapshot (tree, manifests, git deletions/renames, stable repo id).
 - A declarative rule engine with built-in checks: stale path references (with deleting commit),
-  dead relative links, and token bloat with run-to-run trend.
+  dead relative links, broken `@import` cross-references (with a "did you mean" suggestion when
+  the same filename exists elsewhere), and token bloat with run-to-run trend.
+- Import-graph following: files reachable via `@import` from a context file are audited as the
+  context the harness actually loads.
 - Approximate token-cost estimation per file.
 - A gated LLM pass that only runs for new, changed, or over-budget files.
 - Emit mode: no external LLM required — ContextLint writes task bundles a host Claude session

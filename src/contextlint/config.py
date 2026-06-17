@@ -36,6 +36,7 @@ def _rule_from_spec(spec: dict) -> Rule:
         match=spec.get("match"),
         assertion=spec.get("assert", "present"),
         params=spec.get("params", {}),
+        category=spec.get("category", "policy"),
         severity=Severity(spec.get("severity", "medium")),
         enforcement=Enforcement(spec.get("enforcement", "advisory")),
         message=spec.get("message", ""),

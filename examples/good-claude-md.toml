@@ -1,0 +1,82 @@
+# A minimum "is this CLAUDE.md actually useful?" checklist.
+#
+# Built-in checks (stale paths, dead links, broken @imports, token bloat) are already on and
+# cover "is it TRUE". A custom config EXTENDS those, so these rules ADD a "does it contain the
+# essentials" layer. The `absent` rules are a completeness FLOOR (did you even mention X?), not
+# a quality judgement — that's what the LLM rules at the bottom are for.
+#
+# Run:  ctxlint . --config examples/good-claude-md.toml
+
+[gating]
+token_threshold = 1200          # keep it lean; every session pays this token cost
+
+# --- Completeness floor: each essential area should at least be present ---
+# Scoped to the top-level instruction file (bare names match the repo-root file).
+
+[[rules]]
+id = "claude-md-mentions-tests"
+description = "Should tell the agent how to test / verify changes."
+match = '(?i)\btest'
+assert = "absent"
+scope = ["CLAUDE.md", "AGENTS.md"]
+category = "completeness"
+severity = "low"
+message = "No mention of testing — state how to run and verify tests."
+
+[[rules]]
+id = "claude-md-mentions-build-run"
+description = "Should give the common build/run commands."
+match = '(?i)\b(build|run|start|compile|serve|dev)\b'
+assert = "absent"
+scope = ["CLAUDE.md", "AGENTS.md"]
+category = "completeness"
+severity = "low"
+message = "No build/run commands — give the agent the common commands."
+
+[[rules]]
+id = "claude-md-mentions-setup"
+description = "Should cover environment/setup (tools, versions, package manager)."
+match = '(?i)(install|set ?up|dependenc|environment|requirement|venv|\b(uv|pip|npm|pnpm|yarn|poetry|node|cargo|go)\b)'
+assert = "absent"
+scope = ["CLAUDE.md", "AGENTS.md"]
+category = "completeness"
+severity = "info"
+message = "No setup/environment notes — state required tools and how to install."
+
+[[rules]]
+id = "claude-md-mentions-conventions"
+description = "Should describe code style / conventions."
+match = '(?i)(convention|code style|style guide|lint|format|naming|idiom)'
+assert = "absent"
+scope = ["CLAUDE.md", "AGENTS.md"]
+category = "completeness"
+severity = "info"
+message = "No code-style/conventions guidance — state the patterns to follow."
+
+[[rules]]
+id = "claude-md-mentions-architecture"
+description = "Should orient the agent on structure/architecture."
+match = '(?i)(architect|directory|structure|module|layout|package|where .{0,20}live)'
+assert = "absent"
+scope = ["CLAUDE.md", "AGENTS.md"]
+category = "completeness"
+severity = "info"
+message = "No architecture/orientation — point the agent at the key directories."
+
+# --- Hygiene: no scaffolding left behind ---
+[[rules]]
+id = "claude-md-no-placeholder"
+description = "Unfilled scaffolding left in an instruction file."
+match = '(?i)(TODO|TBD|FIXME|lorem ipsum|<placeholder>|XXXX)'
+assert = "present"              # finding when the pattern IS present
+scope = ["CLAUDE.md", "AGENTS.md"]
+category = "policy"
+severity = "low"
+message = "Placeholder/TODO left in an instruction file — fill it in or remove it."
+
+# --- Semantic depth: the parts a regex can't judge (gated LLM pass, advisory) ---
+[[llm_rules]]
+description = "The testing guidance should give a concrete, runnable command (e.g. an exact `test` invocation), not a vague 'run the tests'. Flag if testing is only referenced vaguely."
+
+[[llm_rules]]
+description = "Flag any setup/tooling instruction that contradicts the repo's actual tooling (e.g. says to use pip when the project uses uv/poetry, or names a package manager not present in the repo)."

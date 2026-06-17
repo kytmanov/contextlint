@@ -13,10 +13,19 @@ from datetime import datetime, timezone
 from . import llm, score, state
 from .config import Config
 from .discover import discover
+from .imports import expand_import_graph
 from .models import Enforcement, Finding, Snapshot
 from .rules import evaluate_file
 from .snapshot import build_snapshot
 from .tokens import approx_tokens
+
+
+def _read(root: str, rel: str) -> str | None:
+    try:
+        with open(os.path.join(root, rel), encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return None
 
 
 @dataclass
@@ -74,6 +83,13 @@ class RunResult:
         return score.severity_counts(self.all_findings)
 
     @property
+    def category_scores(self) -> dict[str, int] | None:
+        # Parity with `score`: None when nothing was audited, not a fake set of 100s.
+        if not self.files:
+            return None
+        return score.category_scores(self.all_findings)
+
+    @property
     def has_blocking(self) -> bool:
         return any(f.enforcement is Enforcement.BLOCKING for f in self.all_findings)
 
@@ -84,6 +100,8 @@ class RunResult:
             "generated_at": self.generated_at,
             "provenance": {"provider": self.provider, "model": self.model},
             "score": self.score,
+            "score_version": score.SCORE_VERSION,
+            "category_scores": self.category_scores,
             "severity_counts": self.severity_counts,
             "has_blocking": self.has_blocking,
             "files": [fa.to_dict() for fa in self.files],
@@ -104,7 +122,10 @@ def _should_run_llm(file: str, text: str, tokens: int, prior_files: dict,
 def audit_repo(root: str, cfg: Config, llm_results: dict | None = None,
                model: str | None = None) -> RunResult:
     snap: Snapshot = build_snapshot(root)
-    files = discover(root, cfg.globs, cfg.out_dir)
+    seeds = discover(root, cfg.globs, cfg.out_dir)
+    # Audit the real context surface: the glob-discovered seeds plus everything they pull
+    # in via @import (the harness loads those into context too).
+    files, text_cache = expand_import_graph(snap, seeds, lambda rel: _read(snap.root, rel))
     last_run = state.load_last_run(cfg.resolved_state_dir(), snap.repo_id)
     prior_files = last_run.get("files", {})
 
@@ -113,10 +134,10 @@ def audit_repo(root: str, cfg: Config, llm_results: dict | None = None,
     new_state_files: dict = {}
 
     for rel in files:
-        try:
-            with open(os.path.join(snap.root, rel), encoding="utf-8", errors="replace") as fh:
-                text = fh.read()
-        except OSError:
+        text = text_cache.get(rel)
+        if text is None:
+            text = _read(snap.root, rel)
+        if text is None:
             continue
 
         tokens = approx_tokens(text)

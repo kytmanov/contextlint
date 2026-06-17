@@ -29,6 +29,7 @@ DEFAULT_RULE_SPECS: list[dict] = [
         "match": r"`([^`\n]+)`",
         "assert": "path_like_exists",
         "params": {"git_proven_only": True},  # high precision; set false to flag any missing path
+        "category": "reference",
         "severity": "high",
         "message": "References a path that git shows was deleted or renamed.",
     },
@@ -37,13 +38,25 @@ DEFAULT_RULE_SPECS: list[dict] = [
         "description": "Markdown links whose relative target does not resolve.",
         "match": r"\[[^\]]*\]\(([^)]+)\)",
         "assert": "link_resolves",
+        "category": "reference",
         "severity": "medium",
         "message": "Markdown link target does not resolve.",
+    },
+    {
+        "id": "broken-cross-reference",
+        "description": "@-imports (Claude/Codex) whose target file does not exist in the repo.",
+        "match": r"(?<![\w@])@([^\s)\]]+)",
+        "assert": "ref_resolves",
+        "params": {"skip_code": True},  # `@` inside code/decorators is not an import
+        "category": "reference",
+        "severity": "high",  # the harness loads this; a missing target is a real breakage
+        "message": "References an @import whose target does not exist in the repo.",
     },
     {
         "id": "token-bloat",
         "description": "Context file exceeds the configured approximate token budget.",
         "assert": "token_threshold",
+        "category": "size",
         "severity": "medium",
         "message": "Context file is large; every agent session pays this token cost.",
     },
