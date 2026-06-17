@@ -1,0 +1,45 @@
+# Example ContextLint configuration.
+# All built-in checks ship as default rules; this file shows the three ways to
+# customize validation without writing code.
+
+[contextlint]
+# Which files count as agent context. Defaults already cover the major tools'
+# auto-loaded instruction files; override only to add/remove.
+globs = [
+    "**/AGENTS.md",
+    "**/CLAUDE.md",
+    ".cursor/rules/**/*.mdc",
+    ".github/copilot-instructions.md",
+]
+provider = "agent"          # agent (emit) | openai (later) | bedrock-native (later)
+state_dir = "~/.context-audit"
+
+[gating]
+token_threshold = 1200      # files over this approx-token budget are bloat candidates
+
+# --- A. Knobs on built-in checks (tune severity / disable, no code change) ---
+[checks.dead-relative-link]
+severity = "high"
+
+[checks.token-bloat]
+enabled = true
+
+# --- B. Declarative deterministic rules (new checks from primitives, no code) ---
+[[rules]]
+id = "no-python2"
+description = "We dropped Python 2; flag any mention."
+match = "Python 2"
+assert = "present"          # finding when the pattern is present
+severity = "low"
+message = "Repo dropped Python 2 support; remove this mention."
+
+[[rules]]
+id = "dependencies-declared"
+description = "Inline-code package names must exist in a manifest."
+match = "`([a-z0-9_-]+)` package"
+assert = "manifest_has"
+severity = "medium"
+
+# --- C. Natural-language LLM rules (semantic checks, evaluated in the gated pass) ---
+[[llm_rules]]
+description = "Flag any section describing the old monolith architecture; we moved to microservices in 2025."

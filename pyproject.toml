@@ -1,0 +1,29 @@
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+[project]
+name = "contextlint"
+version = "0.1.0"
+description = "ContextLint — lints agent context files against a repo's actual state."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Alexander Kytmanov" }]
+keywords = ["agents", "claude", "linter", "context", "llm", "agents-md"]
+classifiers = [
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Quality Assurance",
+    "Environment :: Console",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/kytmanov/contextlint"
+Repository = "https://github.com/kytmanov/contextlint"
+
+[project.scripts]
+ctxlint = "contextlint.cli:main"
